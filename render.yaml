@@ -4,4 +4,28 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run app/ui/app.py --server.port $PORT --server.headless true
-    plan: free
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.4
+
+cronJobs:
+  - name: us30ea-fundamentals-etl
+    schedule: "0 4 * * 1-5"          # 07:00 RO
+    command: python app/jobs/fundamentals_etl.py
+
+  - name: us30ea-bias-preopen
+    schedule: "25 13 * * 1-5"        # 16:25 RO
+    command: python app/jobs/bias_preopen.py
+
+  - name: us30ea-watchdog-15m
+    schedule: "*/15 * * * *"
+    command: python app/jobs/watchdog_intraday.py
+
+  - name: us30ea-news-sentiment-am
+    schedule: "5 6 * * 1-5"
+    command: python app/jobs/news_sentiment.py
+
+  - name: us30ea-news-sentiment-noon
+    schedule: "0 10 * * 1-5"
+    command: python app/jobs/news_sentiment.py
