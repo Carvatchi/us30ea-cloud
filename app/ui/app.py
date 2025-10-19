@@ -1,20 +1,22 @@
 import streamlit as st
-import time
-import os, re, time, json, requests
 import pandas as pd
-from datetime import datetime, timezone
+import requests
+import os
+import re
+from datetime import datetime
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-FMP_KEY = os.getenv("FMP_API_KEY", "")
+# ==============================
+# CONFIG & CONSTANTS
+# ==============================
 
-# Instrumente și feed simboluri FMP/Yahoo (quote endpoint)
+FMP_KEY = os.getenv("FMP_API_KEY", "")
 SYMBOLS = {
     "US30": "YM=F",    # Dow futures
     "GOLD": "GC=F",    # Gold futures
-    "OIL":  "CL=F",    # WTI futures
+    "OIL":  "CL=F",    # WTI crude oil
 }
 
-# Liste scurte de cuvinte-cheie, per categorie (expandăm ulterior)
 KW = {
     "fed": ["fed", "powell", "fomc", "rate hike", "rate cut", "dot plot", "qe", "qt", "balance sheet"],
     "mgmt": ["ceo resign", "ceo steps down", "cfo resign", "appointed ceo", "management change", "board change"],
@@ -26,8 +28,12 @@ KW = {
     "usd":  ["dxy", "dollar index", "usd jumps", "usd falls", "treasury yield", "real yields"]
 }
 
+# ==============================
+# HELPER FUNCTIONS
+# ==============================
+
 def get_last_price(sym: str) -> float:
-    """Quote simplu via FMP; fallback la Yahoo dacă vrei extindere."""
+    """Fetch last price from FMP"""
     url = f"https://financialmodelingprep.com/api/v3/quote/{sym}?apikey={FMP_KEY}"
     try:
         r = requests.get(url, timeout=10)
@@ -41,17 +47,10 @@ def get_last_price(sym: str) -> float:
 
 def count_hits(text: str, words: list[str]) -> int:
     t = text.lower()
-    c = 0
-    for w in words:
-        if w in t:
-            c += 1
-    return c
+    return sum(1 for w in words if w in t)
 
 def quick_extractive_bullets(text: str, max_bullets: int = 6) -> list[str]:
-    """Extrage 5-6 fraze relevante bazat pe cuvinte-cheie (simplu, rapid)."""
-    # Split aproximativ pe propoziții
     sents = re.split(r'(?<=[\.\!\?])\s+', text.strip())
-    # Scor per propoziție: câte cuvinte-cheie apar + lungime rezonabilă
     scored = []
     KEYPOOL = set(sum(KW.values(), []))
     for s in sents:
@@ -63,80 +62,48 @@ def quick_extractive_bullets(text: str, max_bullets: int = 6) -> list[str]:
     return [s for _, s in scored[:max_bullets]] or sents[:min(max_bullets, len(sents))]
 
 def analyze_sentiment(text: str) -> float:
-    """Sentiment compound [-1..1] via VADER (neutral around 0)."""
     an = SentimentIntensityAnalyzer()
     return an.polarity_scores(text).get("compound", 0.0)
 
 def map_direction_and_instrument(text: str, sent: float) -> dict:
-    """
-    Heuristică clară:
-    - Negativ macro (hawkish FED, USD up, geopolitic) => US30↓, GOLD↑ (de obicei), OIL ? (dependență geopol/OPEC).
-    - Pozitiv macro (dovish FED, USD down, risk-on) => US30↑, GOLD↓ (de obicei), OIL↑ (dacă cererea/riscul sus).
-    - Chei sectoriale întăresc GOLD/OIL.
-    """
     t = text.lower()
-    hits = {
-        "fed": count_hits(t, KW["fed"]),
-        "mgmt": count_hits(t, KW["mgmt"]),
-        "ma": count_hits(t, KW["ma"]),
-        "guidance": count_hits(t, KW["guidance"]),
-        "geopol": count_hits(t, KW["geopol"]),
-        "gold": count_hits(t, KW["gold"]),
-        "oil":  count_hits(t, KW["oil"]),
-        "usd":  count_hits(t, KW["usd"]),
-    }
+    hits = {k: count_hits(t, v) for k, v in KW.items()}
 
-    # Bias de bază din sentiment general:
     bias = {
         "US30":  1 if sent > 0.1 else (-1 if sent < -0.1 else 0),
-        "GOLD": -1 if sent > 0.1 else ( 1 if sent < -0.1 else 0),  # risk-on → gold down, risk-off → gold up
+        "GOLD": -1 if sent > 0.1 else ( 1 if sent < -0.1 else 0),
         "OIL":   1 if sent > 0.1 else (-1 if sent < -0.1 else 0),
     }
 
-    # Ajustări pe categorii
     if hits["fed"] or hits["usd"]:
-        # USD up / hawkish FED: US30↓, GOLD↓ (rendamente reale ↑), OIL variabil
-        if ("hike" in t or "qt" in t or "hawk" in t or "usd jumps" in t or "yields" in t):
+        if any(w in t for w in ["hike", "qt", "hawk", "usd jumps", "yields"]):
             bias["US30"] = -1
             bias["GOLD"] = -1
-        # USD down / dovish
-        if ("cut" in t or "qe" in t or "usd falls" in t or "dovish" in t):
+        if any(w in t for w in ["cut", "qe", "usd falls", "dovish"]):
             bias["US30"] = +1
-            bias["GOLD"] = +1  # (poate urca dacă USD scade / real yields scad)
+            bias["GOLD"] = +1
     if hits["geopol"]:
-        # Geopolitic tension → GOLD↑, OIL↑ frecvent; US30↓
         bias["GOLD"] = +1
         bias["OIL"]  = +1
         bias["US30"] = -1
-    if hits["oil"] > 0:
+    if hits["oil"]:
         bias["OIL"] = +1
-    if hits["gold"] > 0:
+    if hits["gold"]:
         bias["GOLD"] = +1
 
     return {"bias": bias, "hits": hits}
 
 def estimate_pips(text: str, sent: float, hits: dict) -> dict:
-    """
-    Estimează amplitudinea a.i. să pornească de la 30 pips și să ajungă până la ~165 pips.
-    Combinație: |sentiment| + categorie (fed/mgmt/ma/geopol) + context simpificat.
-    """
-    base = 30  # minim cerut
-    strong = (hits["fed"] + hits["ma"] + hits["mgmt"] + hits["geopol"])  # evenimente grele
-    boost = min(1.0, abs(sent)) * 60 + min(60, strong * 20)  # 0..~120
-    # tăiem la 165 pips
+    base = 30
+    strong = hits["fed"] + hits["ma"] + hits["mgmt"] + hits["geopol"]
+    boost = min(1.0, abs(sent)) * 60 + min(60, strong * 20)
     est = int(min(165, base + boost))
-    # aceeași estimare pentru toate 3 instrumente ca “ordine de mărime”, adaptăm TP per preț
     return {"US30": est, "GOLD": est, "OIL": est}
 
 def derive_tp_levels(symbol: str, direction: int, est_pips: int) -> tuple[str, str]:
-    """
-    Propune TP1/TP2 plecând de la prețul curent (fără nivele structurale).
-    TP1 = ~0.5 * est, TP2 = est; returnează prețuri rotunjite.
-    """
     last = get_last_price(SYMBOLS[symbol])
     if last <= 0:
         return ("n/a", "n/a")
-    step = est_pips  # interpretăm “pips” ca unități de preț: US30=1, GOLD≈0.1, OIL≈0.01 (simplificăm)
     if symbol == "GOLD":
         tp1 = last + (direction * (est_pips * 0.1 * 0.5))
         tp2 = last + (direction * (est_pips * 0.1))
@@ -145,20 +112,67 @@ def derive_tp_levels(symbol: str, direction: int, est_pips: int) -> tuple[str, s
         tp1 = last + (direction * (est_pips * 0.01 * 0.5))
         tp2 = last + (direction * (est_pips * 0.01))
         return (f"{tp1:.2f}", f"{tp2:.2f}")
-    # US30
     tp1 = last + (direction * (est_pips * 0.5))
     tp2 = last + (direction * est_pips)
     return (f"{tp1:.0f}", f"{tp2:.0f}")
 
-st.set_page_config(page_title="US30/GOLD — EA Alert (Cloud)", layout="wide")
-st.title("US30 / GOLD — EA Alert (Cloud MVP)")
-st.info("✅ UI online. Urmează să adăugăm job-urile (watchdog & news) și baza de date.")
+# ==============================
+# PAGE FUNCTIONS
+# ==============================
 
-with st.expander("Status sistem"):
-    st.write({
-        "ui": "running",
-        "jobs": "to be added",
-        "db": "phase B"
-    })
+def page_dashboard():
+    st.title("EA Alert Dashboard")
+    st.write("🧠 Sistem de analiză pentru US30, Gold și Oil.")
+    st.write("Verifică știrile, sentimentul și semnalele generate de IA.")
 
-st.success("Dacă vezi această pagină pe Render după deploy, suntem OK.")
+def page_rezumat_ai():
+    st.title("Rezumat AI (știri + estimări pips)")
+    st.markdown("Lipește textul din emailuri sau știri. Sistemul extrage esența, estimează direcția și propune TP-uri.")
+
+    txt = st.text_area("Text de analizat", height=300, placeholder="Lipește aici textul...")
+    min_move = st.number_input("Prag minim (pips)", 10, 200, 30, 5)
+    if st.button("Analizează"):
+        if not txt.strip():
+            st.warning("Lipește un text pentru analiză.")
+            return
+
+        bullets = quick_extractive_bullets(txt, 6)
+        sent = analyze_sentiment(txt)
+        res = map_direction_and_instrument(txt, sent)
+        est = estimate_pips(txt, sent, res["hits"])
+
+        st.subheader("🧩 Esență din text")
+        for b in bullets:
+            st.markdown(f"- {b}")
+
+        st.subheader("📊 Analiză de sentiment")
+        st.write(f"**Scor sentiment:** {sent:+.2f}")
+
+        rows = []
+        for inst in ["US30", "GOLD", "OIL"]:
+            d = res["bias"][inst]
+            dir_lbl = "NEUTRAL" if d == 0 else ("LONG" if d > 0 else "SHORT")
+            est_p = max(min_move, est[inst])
+            tp1, tp2 = derive_tp_levels(inst, d if d != 0 else 1, est_p)
+            rows.append({
+                "Instrument": inst,
+                "Direcție": dir_lbl,
+                "Estimare (pips)": est_p,
+                "TP1": tp1,
+                "TP2": tp2
+            })
+        st.subheader("📈 Predicție (pips) + TP propus")
+        st.table(pd.DataFrame(rows))
+        st.info("Direcția derivată din sentiment + cuvinte-cheie (FED, CEO, M&A, geopolitic).")
+
+# ==============================
+# MAIN ROUTER
+# ==============================
+
+st.sidebar.title("Meniu")
+page = st.sidebar.selectbox("Alege pagina:", ["Dashboard", "Rezumat AI"])
+
+if page == "Dashboard":
+    page_dashboard()
+elif page == "Rezumat AI":
+    page_rezumat_ai()
