@@ -1,31 +1,50 @@
 services:
+  # --- UI Streamlit (deja live) ---
   - type: web
     name: us30ea-ui
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run app/ui/app.py --server.port $PORT --server.headless true
     autoDeploy: true
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.4
+      - key: FMP_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
 
-cronJobs:
-  - name: us30ea-fundamentals-etl
-    schedule: "0 4 * * 1-5"          # 07:00 RO
-    command: python app/jobs/fundamentals_etl.py
+  # --- Cron: watchdog intraday, din 15 în 15 minute, Luni–Vineri, între 06:00–00:00 RO ---
+  # Render rulează pe UTC. 06:00–00:00 RO ≈ 03–21 UTC (EEST).
+  - type: cron
+    name: us30-watchdog
+    env: python
+    plan: free
+    schedule: "*/15 3-21 * * 1-5"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app/jobs/watchdog_intraday.py
+    envVars:
+      - key: FMP_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
 
-  - name: us30ea-bias-preopen
-    schedule: "25 13 * * 1-5"        # 16:25 RO
-    command: python app/jobs/bias_preopen.py
-
-  - name: us30ea-watchdog-15m
-    schedule: "*/15 * * * *"
-    command: python app/jobs/watchdog_intraday.py
-
-  - name: us30ea-news-sentiment-am
-    schedule: "5 6 * * 1-5"
-    command: python app/jobs/news_sentiment.py
-
-  - name: us30ea-news-sentiment-noon
-    schedule: "0 10 * * 1-5"
-    command: python app/jobs/news_sentiment.py
+  # --- Cron: news/sentiment pre-open (ora 16:25 RO) ---
+  # 16:25 RO (EEST) = 13:25 UTC
+  - type: cron
+    name: us30-news
+    env: python
+    plan: free
+    schedule: "25 13 * * 1-5"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app/jobs/news_sentiment.py
+    envVars:
+      - key: FMP_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
