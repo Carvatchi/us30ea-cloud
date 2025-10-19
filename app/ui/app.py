@@ -55,7 +55,7 @@ with colA:
         except Exception as e:
             st.warning(f"{name}: {e}")
 
-with colB:
+with colB:1
     st.subheader("Status & Info")
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
     st.write(f"**Local time:** {now}")
@@ -64,3 +64,24 @@ with colB:
 
 st.divider()
 st.markdown("**Notă:** Alertele Telegram sunt trimise de job-ul `us30-watchdog` (Render). Acest dashboard verifică live ultimele 2 lumânări de 1 minut direct din FMP.")
+import pandas as pd
+
+LEADERS = ["MSFT","AAPL","GS"]
+
+def fmp_quotes_many(symbols):
+    url = f"https://financialmodelingprep.com/api/v3/quote/{','.join(symbols)}?apikey={FMP_KEY}"
+    r = requests.get(url, timeout=20); r.raise_for_status()
+    return r.json()
+
+st.subheader("Leaders snapshot (US30 drivers)")
+try:
+    q = fmp_quotes_many(LEADERS + ["YM=F"])
+    df = pd.DataFrame([{
+        "symbol": x["symbol"],
+        "price": x["price"],
+        "chg%": x.get("changesPercentage", 0.0),
+        "change": x.get("change", 0.0)
+    } for x in q]).set_index("symbol").loc[LEADERS + ["YM=F"]]
+    st.dataframe(df, use_container_width=True)
+except Exception as e:
+    st.warning(f"Leaders error: {e}")
