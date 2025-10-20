@@ -20,7 +20,6 @@ if not FMP_KEY or not TG_TOKEN or not TG_CHAT:
 # =========================
 # Simboluri FMP
 SYM_US30 = "YM=F"   # Dow futures (proxy US30)
-SYM_GOLD = "GC=F"   # Gold futures
 SYM_OIL  = "CL=F"   # WTI Oil futures
 
 WATCH = [SYM_US30, SYM_GOLD, SYM_OIL]
@@ -31,13 +30,11 @@ POLL_SEC   = 5       # frecvență interogare preț
 # Praguri per instrument (puncte / $)
 THRESH = {
     SYM_US30: 30.0,   # ~30 pips/points
-    SYM_GOLD: 3.0,    # $3
     SYM_OIL : 1.0,    # $1
 }
 # Anti-spam: nu retrimitem dacă prețul nu s-a mutat suficient față de ultima alertă
 RETRIGGER_GAP = {
     SYM_US30: 8.0,   # ~8 puncte
-    SYM_GOLD: 0.7,   # $0.7
     SYM_OIL : 0.3,   # $0.3
 }
 
