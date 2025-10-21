@@ -1,95 +1,58 @@
-import os, json, requests
-from pathlib import Path
-from datetime import datetime, timezone
+# app/jobs/bias_preopen.py — pre-open bias (US30 only)
+import os
+import requests
+import datetime as dt
 
-FMP_KEY = os.getenv("FMP_API_KEY", "").strip()
-TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TG_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+FMP_KEY = os.getenv("FMP_API_KEY", "")
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "")
 
-ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT / "data"
-FUND_PATH = DATA_DIR / "fundamentals.json"
-SENT_PATH = DATA_DIR / "sentiment.json"
+# Rulează cu 5–10 minute înainte de cash open (16:20–16:25 RO → 13:20–13:25 UTC iarna / 14:20–14:25 vara).
+# Îți trimite un bias orientativ pe baza schimbării agregate (index + futures).
 
-LEADERS = ["MSFT", "UNH", "GS", "HD", "JPM"]
+TICKERS = ["^DJI", "YM=F"]  # index + futures
 
-def read_json(p: Path):
-    if not p.exists(): return {}
-    try: return json.loads(p.read_text(encoding="utf-8"))
-    except Exception: return {}
+def utc_now():
+    return dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-def get_quote(symbol: str):
-    url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}"
-    r = requests.get(url, params={"apikey": FMP_KEY}, timeout=15)
-    if r.status_code == 200:
-        arr = r.json()
-        return arr[0] if arr else {}
-    return {}
+def tg(msg: str):
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            json={"chat_id": TG_CHAT, "text": msg, "parse_mode": "HTML"},
+            timeout=10
+        )
+    except Exception as e:
+        print("TG error:", e)
 
-def combine_score(fund_s: float, sent: float, tech: float=0.0):
-    f = (fund_s/50.0 - 1.0)  # 0..100 -> -1..+1
-    return 0.55*f + 0.30*sent + 0.15*tech
+def q(sym):
+    url = f"https://financialmodelingprep.com/api/v3/quote/{sym}?apikey={FMP_KEY}"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    j = r.json()
+    return j[0] if j else None
 
-def arrow(v: float):
-    return "⬆️" if v >= 0.20 else "⬇️" if v <= -0.20 else "≈"
+def label(x):
+    return "BULLISH" if x > 0 else ("BEARISH" if x < 0 else "NEUTRAL")
 
-def label(v: float):
-    if v >= 0.40: return "BULL (strong)"
-    if v >= 0.20: return "BULL (mild)"
-    if v <= -0.40: return "BEAR (strong)"
-    if v <= -0.20: return "BEAR (mild)"
-    return "NEUTRAL"
-
-def pct(x): return f"{x*100:.0f}%"
-
-def send_telegram(text: str):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    r = requests.post(url, json=payload, timeout=15)
-    print("Telegram:", r.status_code)
-    return r.ok
+def arrow(x):
+    return "🟢↑" if x > 0 else ("🔴↓" if x < 0 else "⚪→")
 
 def main():
-    fund = read_json(FUND_PATH)
-    sent = read_json(SENT_PATH)
-    fund_items = fund.get("items") if isinstance(fund, dict) else {}
-
-    per_ticker = []
-    for t in LEADERS:
-        fs = float(fund_items.get(t, {}).get("score", 50.0))
-        ss = float(sent.get(t, 0.0)) if isinstance(sent, dict) else 0.0
-        s = combine_score(fs, ss, 0.0)
-        per_ticker.append((t, s, fs, ss))
-
-    us30_bias = sum(x[1] for x in per_ticker)/len(per_ticker) if per_ticker else 0.0
-
-    macro_sent = float(sent.get("Macro", 0.0)) if isinstance(sent, dict) else 0.0
-    gold_bias = -0.5*us30_bias + -0.2*macro_sent
-
-    gc = get_quote("GC=F"); ym = get_quote("YM=F")
-    top_drivers = sorted(per_ticker, key=lambda x: x[1], reverse=True)
-    best = ", ".join([f"{t}{'↑' if s>0 else '↓' if s<0 else '≈'}" for t,s,_,_ in top_drivers[:3]])
-
-    lines = []
-    lines.append(f"📊 <b>US30 — Pre-open Bias</b>  ({datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC)")
-    lines.append(f"US30: <b>{arrow(us30_bias)}</b>  {label(us30_bias)}  | score {pct(abs(us30_bias))}")
-    lines.append(f"Drivers: {best if best else 'n/a'}")
-    if ym and ym.get('price') is not None and ym.get('changesPercentage') is not None:
-        lines.append(f"YM=F: {ym['price']:.0f}  ({ym['changesPercentage']:.2f}%)")
-    lines.append("")
-    lines.append(f"🟡 <b>GOLD Bias</b>: {arrow(gold_bias)}  {label(gold_bias)} | score {pct(abs(gold_bias))}")
-    if gc and gc.get('price') is not None and gc.get('changesPercentage') is not None:
-        lines.append(f"GC=F: {gc['price']:.0f}  ({gc['changesPercentage']:.2f}%)")
-    det = " • ".join([f"{t}:fund={fs:.0f}/sent={ss:+.2f}" for t,_,fs,ss in per_ticker])
-    if det:
-        lines.append("")
-        lines.append(f"<i>{det}</i>")
-
-    text = "\n".join(lines)
-    if TG_TOKEN and TG_CHAT:
-        send_telegram(text)
-    else:
-        print(text)
+    lines = [f"🕒 {utc_now()} — Pre-open bias"]
+    score = 0.0
+    for s in TICKERS:
+        d = q(s)
+        if not d:
+            continue
+        chg = float(d.get("changesPercentage") or 0)
+        score += chg
+        lines.append(f"{s}: {d.get('price'):.2f} ({chg:.2f}%)")
+    bias = label(score)
+    lines.insert(1, f"US30 Bias: {arrow(score)} <b>{bias}</b> | score {abs(score):.2f}")
+    tg("\n".join(lines))
 
 if __name__ == "__main__":
     main()
